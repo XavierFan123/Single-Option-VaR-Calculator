@@ -230,8 +230,8 @@ def calculate_var_for_option(ticker, expiry, strike, position_size, option_type)
         ax.axvline(var_95, color='orange', linestyle='--', linewidth=2, label=f'VaR 95%: ${var_95:,.2f}')
         ax.axvline(var_99, color='red', linestyle='--', linewidth=2, label=f'VaR 99%: ${var_99:,.2f}')
         ax.set_title(f'{ticker.upper()} 持仓1日盈亏分布')
-        ax.set_xlabel('盈亏 ($)')
-        ax.set_ylabel('频数')
+        ax.set_xlabel('Profit ($)')
+        ax.set_ylabel('Frequency')
         ax.legend()
         
         buf = io.BytesIO()
@@ -278,7 +278,7 @@ def index():
     defaults = {
         'ticker': 'MSTR',
         'expiry': (datetime.now() + pd.DateOffset(years=1)).strftime('%Y-%m-%d'),
-        'strike': '1500',
+        'strike': '350',
         'position_size': '7',
         'option_type': 'call'
     }
@@ -287,7 +287,7 @@ def index():
         # 从表单获取用户输入
         ticker = request.form.get('ticker', 'MSTR')
         expiry = request.form.get('expiry')
-        strike = float(request.form.get('strike', 1500))
+        strike = float(request.form.get('strike', 350))
         position_size = int(request.form.get('position_size', 7))
         option_type = request.form.get('option_type', 'call')
         
