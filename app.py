@@ -140,13 +140,16 @@ class RiskCalculator:
 # (这个函数替代了原来的OptionVARSystem类，用于处理单次请求)
 
 def calculate_var_for_option(ticker, expiry, strike, position_size, option_type):
+    # 为确保每次结果一致，设置随机种子
+    np.random.seed(42)
+    
     results = {}
     try:
         # 获取数据
         stock = yf.Ticker(ticker)
         current_price = stock.history(period="1d")['Close'].iloc[-1]
         
-        # 动态获取期权链以计算IV
+        # 动态获取期权链
         expirations = stock.options
         target_date = pd.Timestamp(expiry)
         closest_expiry = min(expirations, key=lambda d: abs(pd.Timestamp(d) - target_date))
@@ -158,16 +161,29 @@ def calculate_var_for_option(ticker, expiry, strike, position_size, option_type)
         if closest_option.empty:
             raise ValueError(f"无法找到行权价接近 {strike} 的期权。")
         
-        option_price = closest_option['lastPrice'].iloc[0]
+        # --- 关键优化：使用Bid-Ask中间价 ---
+        bid = closest_option['bid'].iloc[0]
+        ask = closest_option['ask'].iloc[0]
+
+        if bid == 0 or ask == 0:
+             # 如果缺少bid/ask，则使用lastPrice作为备用，并给出提示
+            option_price = closest_option['lastPrice'].iloc[0]
+            price_source_info = f" (警告: 使用了可能滞后的lastPrice: ${option_price})"
+        else:
+            option_price = (bid + ask) / 2
+            price_source_info = f" (基于Bid: ${bid}, Ask: ${ask})"
+
         actual_strike = closest_option['strike'].iloc[0]
         
         # 参数计算
         time_to_expiry = RiskCalculator.calculate_time_to_expiry(closest_expiry)
         risk_free_rate = TreasuryRateFetcher.get_risk_free_rate(closest_expiry)
         
+        # --- 关键优化：严格的IV计算 ---
         implied_volatility = ImpliedVolatilityCalculator.calculate_iv(option_price, current_price, actual_strike, time_to_expiry, risk_free_rate, option_type)
         if np.isnan(implied_volatility):
-             implied_volatility = closest_option['impliedVolatility'].iloc[0] # yfinance自带IV作为备用
+            # 如果我们自己的解算器失败，就明确报错，不再使用yfinance的备用值
+            raise ValueError(f"无法从市场价格反推出隐含波动率。市场价格可能不合理。价格来源: {price_source_info}")
 
         # 常量配置
         CONTRACT_MULTIPLIER = 100
@@ -194,15 +210,14 @@ def calculate_var_for_option(ticker, expiry, strike, position_size, option_type)
         # 计算Greeks
         greeks = GreeksCalculator.calculate_greeks(current_price, strike, time_to_expiry, risk_free_rate, implied_volatility, option_type)
 
-        # 准备图表数据
-        # 生成图表并编码为Base64字符串
+        # 生成图表
         fig, ax = plt.subplots(figsize=(8, 5))
         sns.histplot(pnl, bins=100, ax=ax, color='blue', alpha=0.7)
         ax.axvline(var_95, color='orange', linestyle='--', linewidth=2, label=f'VaR 95%: ${-var_95:,.2f}')
         ax.axvline(var_99, color='red', linestyle='--', linewidth=2, label=f'VaR 99%: ${-var_99:,.2f}')
-        ax.set_title(f'{ticker} Portfolio P&L Distribution (1-Day)')
-        ax.set_xlabel('Profit & Loss ($)')
-        ax.set_ylabel('Frequency')
+        ax.set_title(f'{ticker.upper()} 持仓1日盈亏分布')
+        ax.set_xlabel('盈亏 ($)')
+        ax.set_ylabel('频数')
         ax.legend()
         
         buf = io.BytesIO()
@@ -217,9 +232,12 @@ def calculate_var_for_option(ticker, expiry, strike, position_size, option_type)
             'ticker': ticker.upper(),
             'expiry': closest_expiry,
             'strike': strike,
+            'actual_strike': actual_strike,
             'position_size': position_size,
             'option_type': option_type.capitalize(),
             'current_price': round(current_price, 2),
+            'current_option_price': round(option_price, 2),
+            'price_source_info': price_source_info,
             'total_position_value': round(total_position_value, 2),
             'risk_free_rate': round(risk_free_rate * 100, 3),
             'implied_volatility': round(implied_volatility * 100, 2),
