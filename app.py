@@ -6,7 +6,7 @@ import yfinance as yf
 from scipy.stats import norm
 from scipy.optimize import brentq
 import matplotlib
-matplotlib.use('Agg') # 使用非交互式后端，防止在服务器上出错
+matplotlib.use('Agg')  # 使用非交互式后端，防止在服务器上出错
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
@@ -42,9 +42,9 @@ class TreasuryRateFetcher:
                     rates[maturity] = current_yield
             except Exception:
                 continue
-        # 如果获取失败，提供一个备用默认值
+        # 如果获取失败，提供一个备用默认值（优化：更完整的默认曲线）
         if not rates:
-            return {0.25: 0.05, 5: 0.045, 10: 0.045, 30: 0.046}
+            return {0.25: 0.045, 1: 0.046, 2: 0.047, 5: 0.048, 10: 0.049, 30: 0.050}
         return rates
 
     @staticmethod
@@ -63,14 +63,14 @@ class TreasuryRateFetcher:
                 if years_to_expiry <= maturities[0]: return yields[0]
                 if years_to_expiry >= maturities[-1]: return yields[-1]
                 return np.interp(years_to_expiry, maturities, yields)
-            return 0.05 # 默认值
+            return 0.05  # 默认值
         except Exception:
-            return 0.05 # 默认值
+            return 0.05  # 默认值
 
 class ImpliedVolatilityCalculator:
     @staticmethod
     def black_scholes_price(S, K, T, r, sigma, option_type='call'):
-        if T <= 0 or sigma <=0:
+        if T <= 0 or sigma <= 0:
             return max(0, S - K) if option_type == 'call' else max(0, K - S)
         d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
@@ -80,13 +80,28 @@ class ImpliedVolatilityCalculator:
             return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
     @staticmethod
-    def calculate_iv(option_price, S, K, T, r, option_type='call'):
+    def calculate_iv(option_price, S, K, T, r, option_type='call', chain=None):
         if T <= 0: return np.nan
         objective = lambda sigma: ImpliedVolatilityCalculator.black_scholes_price(S, K, T, r, sigma, option_type) - option_price
         try:
             return brentq(objective, 0.001, 5.0, maxiter=100)
         except (ValueError, RuntimeError):
-            return np.nan # 如果找不到解，返回nan
+            # 优化：添加备用IV逻辑
+            if chain is not None and 'impliedVolatility' in chain.columns:
+                fallback_iv = chain['impliedVolatility'].iloc[0]
+                if not np.isnan(fallback_iv):
+                    return fallback_iv
+            # 进一步备用：计算历史波动率（基于60天历史数据）
+            try:
+                stock = yf.Ticker(chain['contractSymbol'].iloc[0].split('_')[0])
+                hist = stock.history(period="3mo")
+                if len(hist) >= 2:
+                    returns = np.log(hist['Close'] / hist['Close'].shift(1))
+                    hist_vol = returns.std() * np.sqrt(252)  # 年化
+                    return hist_vol
+            except:
+                pass
+            return np.nan  # 如果所有失败，返回nan
 
 class GreeksCalculator:
     @staticmethod
@@ -101,7 +116,7 @@ class GreeksCalculator:
             greeks['theta'] = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
             greeks['vega'] = S * norm.pdf(d1) * np.sqrt(T) / 100
             greeks['rho'] = K * T * np.exp(-r * T) * norm.cdf(d2) / 100
-        else: # Put
+        else:  # Put
             greeks['delta'] = norm.cdf(d1) - 1
             greeks['gamma'] = norm.pdf(d1) / (S * sigma * np.sqrt(T))
             greeks['theta'] = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
@@ -128,13 +143,13 @@ class RiskCalculator:
 
     @staticmethod
     def calculate_var(pnl, confidence_level):
-        return np.percentile(pnl, (1 - confidence_level) * 100)
+        # 优化：使用'lower'方法，更保守的分位计算
+        return np.percentile(pnl, (1 - confidence_level) * 100, method='lower')
 
     @staticmethod
     def calculate_cvar(pnl, confidence_level):
         var = RiskCalculator.calculate_var(pnl, confidence_level)
-        return pnl[pnl <= var].mean()
-
+        return pnl[pnl <= var].mean() if len(pnl[pnl <= var]) > 0 else var
 
 # --- 2. 主计算函数 ---
 # (这个函数替代了原来的OptionVARSystem类，用于处理单次请求)
@@ -179,10 +194,9 @@ def calculate_var_for_option(ticker, expiry, strike, position_size, option_type)
         time_to_expiry = RiskCalculator.calculate_time_to_expiry(closest_expiry)
         risk_free_rate = TreasuryRateFetcher.get_risk_free_rate(closest_expiry)
         
-        # --- 关键优化：严格的IV计算 ---
-        implied_volatility = ImpliedVolatilityCalculator.calculate_iv(option_price, current_price, actual_strike, time_to_expiry, risk_free_rate, option_type)
+        # --- 关键优化：严格的IV计算 + 备用逻辑 ---
+        implied_volatility = ImpliedVolatilityCalculator.calculate_iv(option_price, current_price, actual_strike, time_to_expiry, risk_free_rate, option_type, chain=closest_option)
         if np.isnan(implied_volatility):
-            # 如果我们自己的解算器失败，就明确报错，不再使用yfinance的备用值
             raise ValueError(f"无法从市场价格反推出隐含波动率。市场价格可能不合理。价格来源: {price_source_info}")
 
         # 常量配置
@@ -213,8 +227,8 @@ def calculate_var_for_option(ticker, expiry, strike, position_size, option_type)
         # 生成图表
         fig, ax = plt.subplots(figsize=(8, 5))
         sns.histplot(pnl, bins=100, ax=ax, color='blue', alpha=0.7)
-        ax.axvline(var_95, color='orange', linestyle='--', linewidth=2, label=f'VaR 95%: ${-var_95:,.2f}')
-        ax.axvline(var_99, color='red', linestyle='--', linewidth=2, label=f'VaR 99%: ${-var_99:,.2f}')
+        ax.axvline(var_95, color='orange', linestyle='--', linewidth=2, label=f'VaR 95%: ${var_95:,.2f}')
+        ax.axvline(var_99, color='red', linestyle='--', linewidth=2, label=f'VaR 99%: ${var_99:,.2f}')
         ax.set_title(f'{ticker.upper()} 持仓1日盈亏分布')
         ax.set_xlabel('盈亏 ($)')
         ax.set_ylabel('频数')
