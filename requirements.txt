@@ -6,3 +6,4 @@ yfinance
 scipy
 matplotlib
 seaborn
+gunicorn 
